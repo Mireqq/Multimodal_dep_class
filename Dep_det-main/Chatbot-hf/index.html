@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Depression Detection Chatbot</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="chat-container">
+    <h2> Depression Detection Chatbot</h2>
+
+    <div id="chatLog" class="chat-box"></div>
+
+    <form id="chatForm">
+      <label>Enter text (optional):</label><br />
+      <textarea id="textInput" rows="3" placeholder="Talk about how you feel..."></textarea><br />
+
+      <label>Upload or record audio:</label><br />
+      <input type="file" id="audioInput" accept="audio/*"><br />
+
+      <div class="controls">
+        <button type="button" id="recordBtn">🎙 Start Recording</button>
+        <button type="button" id="stopBtn" disabled>⏹ Stop</button>
+        <button type="submit">Send</button>
+      </div>
+    </form>
+
+    <div class="response">
+      <strong>Severity:</strong> <span id="severity" class="severity-label">N/A</span><br/>
+      <strong>Transcription:</strong> <span id="transcription">-</span><br/>
+      <strong>Latency:</strong> <span id="latency">-</span>
+    </div>    
+
+    <div id="summaryBox">
+      <h3>🧾 Chat Summary</h3>
+      <p><strong>Average Severity:</strong> <span id="avgSeverity">N/A</span></p>
+      <canvas id="severityChart" height="120"></canvas>
+    </div>
+  </div>
+
+  <script>
+    const chatLog = document.getElementById("chatLog");
+    const textInput = document.getElementById("textInput");
+    const audioInput = document.getElementById("audioInput");
+    const recordBtn = document.getElementById("recordBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const chatForm = document.getElementById("chatForm");
+    const severityList = [];
+
+    let mediaRecorder;
+    let audioChunks = [];
+
+    const OPENAI_API_KEY = "api key here";
+    const OPENAI_MODEL = "gpt-4o-mini";
+
+    recordBtn.onclick = async () => {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaRecorder = new MediaRecorder(stream);
+      audioChunks = [];
+      mediaRecorder.start();
+
+      mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+      mediaRecorder.onstop = () => {
+        const audioBlob = new Blob(audioChunks, { type: "audio/webm" });
+        const file = new File([audioBlob], "recording.webm", { type: "audio/webm" });
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        audioInput.files = dt.files;
+      };
+
+      recordBtn.disabled = true;
+      stopBtn.disabled = false;
+    };
+
+    stopBtn.onclick = () => {
+      mediaRecorder.stop();
+      recordBtn.disabled = false;
+      stopBtn.disabled = true;
+    };
+
+    chatForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      await submitInput();
+    });
+
+    textInput.addEventListener("keydown", e => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        chatForm.requestSubmit();
+      }
+    });
+
+    async function submitInput() {
+      const text = textInput.value.trim();
+      const file = audioInput.files[0];
+
+      if (!text && !file) {
+        alert("Please enter text or record audio.");
+        return;
+      }
+
+      appendToChat("You", text || "[Audio only]");
+
+      let audioBase64 = null;
+      if (file) {
+        const arrayBuffer = await file.arrayBuffer();
+        const uint8Array = new Uint8Array(arrayBuffer);
+        const binary = Array.from(uint8Array).map(b => String.fromCharCode(b)).join('');
+        audioBase64 = btoa(binary);
+      }
+
+      const payload = { text: text, audio: audioBase64 };
+
+      try {
+        const response = await fetch("https://mireq-gptintegratedbot-2.hf.space/send_message", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await response.json();
+        console.log("HF response:", data);
+
+        const transcript = data.transcription || "-";
+        const severity = data.severity || "N/A";
+        const latency = data.latency || "-";
+        document.getElementById("latency").textContent = latency;
+
+        document.getElementById("transcription").textContent = transcript;
+
+        const severityEl = document.getElementById("severity");
+        severityEl.textContent = severity;
+        severityEl.className = "severity-label";
+        if (["non", "mild", "moderate", "severe"].includes(severity)) {
+          severityEl.classList.add(`severity-${severity}`);
+          severityList.push(severity);
+          updateChart();
+        }
+
+        const fullText = text || transcript;
+        const gptReply = await getGPTResponse(fullText);
+        appendToChat("GPT", gptReply);
+
+        if ((text || "").toLowerCase().includes("end chat")) {
+          showSummary();
+        }
+
+        textInput.value = "";
+        audioInput.value = "";
+        audioInput.type = "";
+        audioInput.type = "file";
+
+      } catch (error) {
+        console.error("Backend Error:", error);
+        appendToChat("GPT", "Sorry, something went wrong.");
+      }
+    }
+
+    async function getGPTResponse(prompt) {
+      try {
+        const res = await fetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${OPENAI_API_KEY}`
+          },
+          body: JSON.stringify({
+            model: OPENAI_MODEL,
+            messages: [
+              {
+                role: "system",
+                content: "You are a compassionate mental health assistant. Be empathetic and kind, without providing medical advice."
+              },
+              {
+                role: "user",
+                content: prompt
+              }
+            ]
+          })
+        });
+
+        const data = await res.json();
+        return data.choices?.[0]?.message?.content || "I'm here to listen.";
+      } catch (err) {
+        return "GPT Error: " + err.message;
+      }
+    }
+
+    function appendToChat(sender, message) {
+      const div = document.createElement("div");
+      div.className = `message ${sender === "You" ? "user" : "bot"}`;
+      div.innerHTML = `<strong>${sender}:</strong> ${message}`;
+      chatLog.appendChild(div);
+      chatLog.scrollTop = chatLog.scrollHeight;
+    }
+
+    function showSummary() {
+      const mapping = { non: 0, mild: 1, moderate: 2, severe: 3 };
+      const avg = severityList.reduce((a, b) => a + mapping[b], 0) / severityList.length || 0;
+      const reverseMap = ["non", "mild", "moderate", "severe"];
+      document.getElementById("avgSeverity").textContent = reverseMap[Math.round(avg)];
+    }
+
+    let chart;
+    function updateChart() {
+      const ctx = document.getElementById("severityChart").getContext("2d");
+      const mapping = { non: 0, mild: 1, moderate: 2, severe: 3 };
+
+      if (chart) chart.destroy();
+      chart = new Chart(ctx, {
+        type: "line",
+        data: {
+          labels: severityList.map((_, i) => `Message ${i + 1}`),
+          datasets: [{
+            label: "Severity Trend",
+            data: severityList.map(s => mapping[s]),
+            borderColor: "blue",
+            tension: 0.3,
+            fill: false
+          }]
+        },
+        options: {
+          scales: {
+            y: {
+              min: 0,
+              max: 3,
+              ticks: {
+                callback: value => ["non", "mild", "moderate", "severe"][value]
+              }
+            }
+          }
+        }
+      });
+    }
+  </script>
+</body>
+</html>
